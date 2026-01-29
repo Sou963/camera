@@ -11,64 +11,81 @@ function App() {
   const [upscaler, setUpscaler] = useState(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Initializing...");
-  const [facingMode, setFacingMode] = useState("environment");
+  const [facingMode, setFacingMode] = useState("environment"); // 'environment' = back, 'user' = selfie
   const [lastImage, setLastImage] = useState(null);
   const [flash, setFlash] = useState(false);
 
-  // Init AI + Camera
+  // 1. Initialize Upscaler once
   useEffect(() => {
-    const initApp = async () => {
+    async function initAI() {
       await tf.ready();
       setUpscaler(new Upscaler());
-      startCamera();
-    };
+    }
+    initAI();
+  }, []);
 
-    initApp();
-  }, [facingMode]);
+  // 2. Camera Management (Handles Switching & Cleanup)
+  useEffect(() => {
+    let currentStream = null;
 
-  // Camera Logic
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode,
-          width: { ideal: 1080 },
-          height: { ideal: 1920 }
-        }
-      });
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+    const startCamera = async () => {
+      setStatus("Opening Camera...");
+      
+      // Stop previous tracks to release the hardware lock
+      if (videoRef.current && videoRef.current.srcObject) {
+        const tracks = videoRef.current.srcObject.getTracks();
+        tracks.forEach(track => track.stop());
       }
 
-      setStatus("Ready");
-    } catch (error) {
-      console.error(error);
-      setStatus("Camera Error");
-    }
-  };
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facingMode, // Mobile switching logic
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        });
 
+        currentStream = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+        setStatus("Ready");
+      } catch (error) {
+        console.error("Camera access error:", error);
+        setStatus("Camera Error");
+      }
+    };
+
+    startCamera();
+
+    // Cleanup: Shut down camera when switching modes or closing app
+    return () => {
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [facingMode]);
+
+  // 3. UI Actions
   const toggleCamera = () => {
-    setFacingMode(prev =>
-      prev === "user" ? "environment" : "user"
-    );
+    setFacingMode(prev => (prev === "user" ? "environment" : "user"));
   };
 
-  // Save Image
   const saveImage = (dataUrl) => {
     const link = document.createElement("a");
     link.href = dataUrl;
     link.download = `AI_Snap_${Date.now()}.png`;
+    document.body.appendChild(link);
     link.click();
-
+    document.body.removeChild(link);
     setLastImage(dataUrl);
   };
 
-  // Capture + Enhance
   const captureAndEnhance = async () => {
-    if (!upscaler || loading) return;
+    if (!upscaler || loading || !videoRef.current) return;
 
-    // Flash effect
+    // Trigger Flash
     setFlash(true);
     setTimeout(() => setFlash(false), 150);
 
@@ -78,36 +95,34 @@ function App() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
+    // Match canvas to high-res video feed
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-
     const ctx = canvas.getContext("2d");
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     try {
-      await tf.nextFrame();
-
+      await tf.nextFrame(); // Let UI update "Enhancing" status
+      
       const enhancedImage = await upscaler.upscale(canvas, {
-        patchSize: 64,
+        patchSize: 64, // Crucial for mobile GPU memory
         padding: 5
       });
 
       saveImage(enhancedImage);
       setStatus("Saved!");
-
       setTimeout(() => setStatus("Ready"), 2000);
     } catch (err) {
       console.error(err);
-      setStatus("GPU Error");
+      setStatus("GPU Busy - Try Again");
     } finally {
       setLoading(false);
     }
   };
 
-  // UI
   return (
     <div style={styles.app}>
-      {/* Camera Preview */}
+      {/* Background Viewfinder */}
       <video
         ref={videoRef}
         autoPlay
@@ -116,32 +131,30 @@ function App() {
         style={styles.video}
       />
 
-      {/* Flash Overlay */}
-      {flash && <div style={styles.flash} />}
+      {/* Flash Effect Layer */}
+      {flash && <div style={styles.flashOverlay} />}
 
-      {/* Top Status */}
+      {/* Top UI */}
       <div style={styles.header}>
         <div style={styles.statusPill}>{status}</div>
       </div>
 
-      {/* Loading Overlay */}
+      {/* Loading Block */}
       {loading && (
-        <div style={styles.loading}>
+        <div style={styles.loadingScreen}>
           <div className="spinner"></div>
-          <p>Sharpening pixels...</p>
+          <p style={{ marginTop: 10, letterSpacing: 1 }}>UPSCALING QUALITY...</p>
         </div>
       )}
 
-      {/* Controls */}
+      {/* Bottom Controls */}
       <div style={styles.controls}>
-        {/* Preview */}
-        <div style={styles.preview}>
-          {lastImage && (
-            <img src={lastImage} alt="Last" style={styles.previewImg} />
-          )}
+        {/* Recent Photo Preview */}
+        <div style={styles.previewBox}>
+          {lastImage && <img src={lastImage} alt="Last" style={styles.previewImg} />}
         </div>
 
-        {/* Capture */}
+        {/* Shutter */}
         <button
           onClick={captureAndEnhance}
           disabled={loading}
@@ -155,76 +168,79 @@ function App() {
           />
         </button>
 
-        {/* Flip Camera */}
-        <button onClick={toggleCamera} style={styles.iconBtn}>
+        {/* Lens Flip */}
+        <button onClick={toggleCamera} style={styles.flipBtn}>
           🔄
         </button>
       </div>
 
+      {/* Hidden processing canvas */}
       <canvas ref={canvasRef} style={{ display: "none" }} />
 
-      {/* Spinner CSS */}
+      {/* CSS Animations */}
       <style>{`
         .spinner {
-          width: 40px;
-          height: 40px;
-          border: 4px solid rgba(255,255,255,0.2);
-          border-top: 4px solid #fff;
+          width: 50px;
+          height: 50px;
+          border: 5px solid rgba(255,255,255,0.2);
+          border-top: 5px solid #fff;
           border-radius: 50%;
           animation: spin 1s linear infinite;
-          margin-bottom: 10px;
         }
         @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
         }
       `}</style>
     </div>
   );
 }
 
-// Styles
 const styles = {
   app: {
     position: "fixed",
     inset: 0,
-    background: "#000",
+    backgroundColor: "#000",
     overflow: "hidden",
-    fontFamily: "sans-serif"
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
   },
   video: {
     position: "absolute",
     inset: 0,
     width: "100%",
     height: "100%",
-    objectFit: "cover"
+    objectFit: "cover", // Makes it full screen
+    zIndex: 1
   },
-  flash: {
+  flashOverlay: {
     position: "absolute",
     inset: 0,
-    background: "#fff",
-    zIndex: 5
+    backgroundColor: "#fff",
+    zIndex: 10
   },
   header: {
     position: "absolute",
-    top: 40,
+    top: 50,
     width: "100%",
     display: "flex",
     justifyContent: "center",
-    zIndex: 10
+    zIndex: 15
   },
   statusPill: {
-    padding: "8px 20px",
-    borderRadius: 20,
-    background: "rgba(0,0,0,0.5)",
+    padding: "8px 16px",
+    borderRadius: 25,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    backdropFilter: "blur(10px)",
     color: "#fff",
-    fontSize: 14
+    fontSize: 13,
+    fontWeight: "600",
+    border: "1px solid rgba(255,255,255,0.2)"
   },
-  loading: {
+  loadingScreen: {
     position: "absolute",
     inset: 0,
-    background: "rgba(0,0,0,0.7)",
-    zIndex: 20,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    zIndex: 100,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
@@ -235,34 +251,38 @@ const styles = {
     position: "absolute",
     bottom: 0,
     width: "100%",
-    height: 150,
+    height: 160,
     display: "flex",
     justifyContent: "space-around",
     alignItems: "center",
-    background: "linear-gradient(transparent, rgba(0,0,0,0.9))",
-    zIndex: 10
+    background: "linear-gradient(to top, rgba(0,0,0,0.8), transparent)",
+    zIndex: 20,
+    paddingBottom: 30
   },
   shutterOuter: {
-    width: 80,
-    height: 80,
+    width: 84,
+    height: 84,
     borderRadius: "50%",
-    border: "4px solid #fff",
-    background: "transparent",
+    border: "5px solid #fff",
+    backgroundColor: "transparent",
     display: "flex",
     justifyContent: "center",
-    alignItems: "center"
+    alignItems: "center",
+    cursor: "pointer",
+    outline: "none"
   },
   shutterInner: {
-    width: 65,
-    height: 65,
+    width: 68,
+    height: 68,
     borderRadius: "50%",
-    transition: "0.2s"
+    transition: "transform 0.1s, background 0.3s",
   },
-  preview: {
-    width: 50,
-    height: 50,
-    borderRadius: 10,
-    background: "#222",
+  previewBox: {
+    width: 55,
+    height: 55,
+    borderRadius: 12,
+    backgroundColor: "#1a1a1a",
+    border: "2px solid rgba(255,255,255,0.4)",
     overflow: "hidden"
   },
   previewImg: {
@@ -270,14 +290,19 @@ const styles = {
     height: "100%",
     objectFit: "cover"
   },
-  iconBtn: {
-    width: 50,
-    height: 50,
+  flipBtn: {
+    width: 55,
+    height: 55,
     borderRadius: "50%",
     border: "none",
-    background: "rgba(255,255,255,0.2)",
+    backgroundColor: "rgba(255,255,255,0.15)",
+    backdropFilter: "blur(10px)",
     color: "#fff",
-    fontSize: 20
+    fontSize: 24,
+    cursor: "pointer",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center"
   }
 };
 
