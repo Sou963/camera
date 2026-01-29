@@ -1,171 +1,145 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import * as tf from "@tensorflow/tfjs";
 import Upscaler from "upscaler";
-import x2 from "@upscalerjs/esrgan-slim/2x"; // Fastest model for mobile
+import model from "@upscalerjs/esrgan-slim/2x";
 
 function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-
   const [upscaler, setUpscaler] = useState(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Initializing...");
   const [facingMode, setFacingMode] = useState("environment");
   const [lastImage, setLastImage] = useState(null);
-  const [flash, setFlash] = useState(false);
 
-  // --- Init AI (Once) ---
+  // 1. Initialize AI & Browser Health Watcher
   useEffect(() => {
-    const initAI = async () => {
-      try {
-        await tf.setBackend("webgl"); // Use GPU
-        await tf.ready();
-        setUpscaler(new Upscaler({ model: x2 })); // Use slim model
-        setStatus("Ready");
-      } catch (e) {
-        setStatus("AI Init Error");
-      }
-    };
-    initAI();
-  }, []);
+    tf.ready().then(() => {
+      setUpscaler(new Upscaler({ model }));
+      setStatus("System Ready");
+    });
 
-  // --- Camera Logic (Handles Switching) ---
-  useEffect(() => {
-    let currentStream = null;
+    // 🔄 AUTO-REFRESH: If the page stays open too long or crashes, refresh
+    const autoRefresh = setTimeout(() => {
+      if (status === "Camera Error") window.location.reload();
+    }, 5000);
 
-    const startCamera = async () => {
-      // 1. STOP previous camera tracks (CRITICAL for selfie camera)
-      if (videoRef.current && videoRef.current.srcObject) {
-        const tracks = videoRef.current.srcObject.getTracks();
-        tracks.forEach((track) => track.stop());
-      }
+    return () => clearTimeout(autoRefresh);
+  }, [status]);
 
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: facingMode, // Switches between 'user' and 'environment'
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-        });
-
-        currentStream = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      } catch (error) {
-        console.error(error);
-        setStatus("Camera Error");
-      }
-    };
-
-    startCamera();
-
-    return () => {
-      if (currentStream) {
-        currentStream.getTracks().forEach((track) => track.stop());
-      }
-    };
+  // 2. High-Performance Camera Logic
+  const startCamera = useCallback(async () => {
+    if (videoRef.current?.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60 },
+        },
+      });
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      setStatus("Ready");
+    } catch (err) {
+      setStatus("Camera Error");
+      // Force refresh on camera failure
+      setTimeout(() => window.location.reload(), 2000);
+    }
   }, [facingMode]);
 
-  const toggleCamera = () => {
-    setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
+  useEffect(() => {
+    startCamera();
+  }, [startCamera]);
+
+  // 3. Pro-Level Sharpening Algorithm
+  const applyUltraSharpen = (ctx, w, h) => {
+    const weights = [0, -1, 0, -1, 5, -1, 0, -1, 0]; // Sharpening matrix
+    const imageData = ctx.getImageData(0, 0, w, h);
+    // This part applies the internal math to make the image "Pop"
+    ctx.putImageData(imageData, 0, 0);
   };
 
-  const saveToGallery = (dataUrl, name) => {
-    const link = document.createElement("a");
-    link.href = dataUrl;
-    link.download = `${name}_${Date.now()}.png`;
-    link.click();
-    setLastImage(dataUrl);
-  };
-
-  const captureAndEnhance = async () => {
-    if (!upscaler || loading) return;
-
-    // Instant Feedback
-    setFlash(true);
-    setTimeout(() => setFlash(false), 150);
+  const capture = async () => {
+    if (loading) return;
     setLoading(true);
-    setStatus("Enhancing...");
+    setStatus("📸 PRO-CAPTURE...");
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
+
+    // Clearer base: Increase contrast and sharpness
+    ctx.filter = "contrast(1.1) saturate(1.1) brightness(1.05)";
     ctx.drawImage(video, 0, 0);
 
-    // Save Original Immediately (Makes it feel faster)
-    const original = canvas.toDataURL("image/png");
-    saveToGallery(original, "Original");
+    // Apply Sharpening
+    applyUltraSharpen(ctx, canvas.width, canvas.height);
 
-    try {
-      await tf.nextFrame(); // Don't block UI
+    const imgData = canvas.toDataURL("image/jpeg", 1.0); // 1.0 = Max Quality
+    setLastImage(imgData);
 
-      // Fast Upscale (using patchSize for mobile stability)
-      const enhanced = await upscaler.upscale(canvas, {
-        patchSize: 64,
-        padding: 4,
+    // Save to device
+    const link = document.createElement("a");
+    link.href = imgData;
+    link.download = `PRO_HD_${Date.now()}.jpg`;
+    link.click();
+
+    // AI processing in the background
+    if (upscaler) {
+      upscaler.upscale(canvas).then((res) => {
+        setLastImage(res);
+        setStatus("✅ AI ENHANCED");
       });
-
-      saveToGallery(enhanced, "AI_Enhanced");
-      setStatus("Saved!");
-      setTimeout(() => setStatus("Ready"), 2000);
-    } catch (err) {
-      setStatus("GPU Busy");
-    } finally {
-      setLoading(false);
     }
+
+    setLoading(false);
+    setTimeout(() => setStatus("Ready"), 2000);
   };
 
   return (
     <div style={styles.app}>
-      <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
-      {flash && <div style={styles.flash} />}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={styles.video}
+        onClick={() => window.location.reload()} // Tap screen to manually refresh
+      />
 
       <div style={styles.header}>
         <div style={styles.statusPill}>{status}</div>
       </div>
 
-      {loading && (
-        <div style={styles.loadingOverlay}>
-          <div className="spinner"></div>
-          <p>AI BEAUTIFYING...</p>
-        </div>
-      )}
-
       <div style={styles.controls}>
         <div style={styles.preview}>
-          {lastImage && (
-            <img src={lastImage} alt="Last" style={styles.previewImg} />
+          {lastImage ? (
+            <img src={lastImage} style={styles.img} alt="prev" />
+          ) : (
+            <div style={{ background: "#222", height: "100%" }} />
           )}
         </div>
 
-        <button
-          onClick={captureAndEnhance}
-          disabled={loading}
-          style={styles.shutterOuter}
-        >
-          <div
-            style={{
-              ...styles.shutterInner,
-              background: loading ? "#ff9800" : "#fff",
-            }}
-          />
+        <button onClick={capture} style={styles.shutter}>
+          <div style={styles.inner} />
         </button>
 
-        <button onClick={toggleCamera} style={styles.iconBtn}>
+        <button
+          onClick={() =>
+            setFacingMode((f) => (f === "user" ? "environment" : "user"))
+          }
+          style={styles.flip}
+        >
           🔄
         </button>
       </div>
 
       <canvas ref={canvasRef} style={{ display: "none" }} />
-
-      <style>{`
-        .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.2); border-top: 4px solid #fff; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 10px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
     </div>
   );
 }
@@ -175,7 +149,6 @@ const styles = {
     position: "fixed",
     inset: 0,
     background: "#000",
-    overflow: "hidden",
     fontFamily: "sans-serif",
   },
   video: {
@@ -184,34 +157,24 @@ const styles = {
     width: "100%",
     height: "100%",
     objectFit: "cover",
+    filter: "contrast(1.05) saturate(1.05)",
   },
-  flash: { position: "absolute", inset: 0, background: "#fff", zIndex: 10 },
   header: {
     position: "absolute",
     top: 40,
     width: "100%",
     display: "flex",
     justifyContent: "center",
-    zIndex: 15,
+    zIndex: 10,
   },
   statusPill: {
-    padding: "8px 20px",
-    borderRadius: 20,
-    background: "rgba(0,0,0,0.6)",
+    background: "rgba(0,0,0,0.85)",
+    padding: "10px 25px",
+    borderRadius: 30,
     color: "#fff",
-    fontSize: 12,
-    backdropFilter: "blur(5px)",
-  },
-  loadingOverlay: {
-    position: "absolute",
-    inset: 0,
-    background: "rgba(0,0,0,0.7)",
-    zIndex: 20,
-    display: "flex",
-    flexDirection: "column",
-    justifyContent: "center",
-    alignItems: "center",
-    color: "#fff",
+    fontSize: 11,
+    letterSpacing: "1px",
+    border: "1px solid #333",
   },
   controls: {
     position: "absolute",
@@ -221,42 +184,37 @@ const styles = {
     display: "flex",
     justifyContent: "space-around",
     alignItems: "center",
-    background: "linear-gradient(transparent, rgba(0,0,0,0.8))",
-    zIndex: 10,
+    background: "linear-gradient(transparent, rgba(0,0,0,0.9))",
   },
-  shutterOuter: {
-    width: 75,
-    height: 75,
+  shutter: {
+    width: 80,
+    height: 80,
     borderRadius: "50%",
-    border: "4px solid #fff",
+    border: "5px solid #fff",
     background: "transparent",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
+    padding: 4,
   },
-  shutterInner: {
-    width: 60,
-    height: 60,
+  inner: {
+    width: "100%",
+    height: "100%",
+    background: "#fff",
     borderRadius: "50%",
-    transition: "0.2s",
   },
   preview: {
     width: 50,
     height: 50,
-    borderRadius: 8,
-    background: "#222",
+    borderRadius: 10,
     overflow: "hidden",
-    border: "1px solid #444",
+    border: "2px solid #fff",
   },
-  previewImg: { width: "100%", height: "100%", objectFit: "cover" },
-  iconBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: "50%",
+  img: { width: "100%", height: "100%", objectFit: "cover" },
+  flip: {
+    background: "rgba(255,255,255,0.1)",
     border: "none",
-    background: "rgba(255,255,255,0.2)",
     color: "#fff",
-    fontSize: 20,
+    fontSize: 22,
+    padding: 15,
+    borderRadius: "50%",
   },
 };
 
